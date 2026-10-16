@@ -2,7 +2,7 @@
 // @name         Aliyun Role Switch
 // @name:zh-CN   阿里云控制台一键切换身份
 // @namespace    https://github.com/BlackHole1
-// @version      4.0.0
+// @version      4.1.0
 // @description  Switch the Aliyun console to a preconfigured RAM role and back with one click.
 // @description:zh-CN 在阿里云控制台一键切换到预先配置的 RAM 角色，再一键切回登录身份。
 // @license      MIT
@@ -19,9 +19,12 @@
 // ==/UserScript==
 
 // 使用方法 (支持 Tampermonkey、Violentmonkey，不支持 Greasemonkey 4):
-// 1. 打开任意阿里云控制台页面，点左下角「配置切换身份」(或 Tampermonkey 菜单里的「设置切换身份」)，
+// 1. 打开任意阿里云控制台页面，点左侧边缘的「配置切换身份」(或 Tampermonkey 菜单里的「设置切换身份」)，
 //    填入要切换的主账号 UID (或企业别名、默认域名) 和角色名，可以配置多个
-// 2. 之后左下角按钮:
+// 2. 按钮平时收在页面边缘，只露出一个带箭头的小标签:
+//    - 点一下小标签: 展开按钮，再点一下 (或按 Esc) 收起
+//    - 按住小标签拖动: 调整位置，会吸附到左右边缘 (Tampermonkey 菜单里可以「重置按钮位置」)
+// 3. 展开后的按钮:
 //    - 直接点击: 在当前页切换，完成后刷新
 //    - Command (Windows 上是 Ctrl) 加点击: 切换后在新标签页打开当前地址
 //    - 配置了多个身份时，点按钮会先弹出身份列表
@@ -44,6 +47,9 @@
   const STORAGE_KEY = "identities";
   const TIMEOUT_MS = 20 * 1000;
   const NEW_TAB_TIP = "Command/Ctrl + 点击: 在新标签页打开";
+  const POSITION_KEY = "dockPosition";
+  const DEFAULT_POSITION = { edge: "left", ratio: 0.85 };
+  const DRAG_THRESHOLD_PX = 5;
 
   const pageWindow = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
 
@@ -268,11 +274,29 @@
   const STYLE = `
     :host { all: initial; }
     * { box-sizing: border-box; font: 12px/1.5 -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; }
-    .dock { position: fixed; left: 16px; bottom: 16px; z-index: 2147483646; display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
-    .main { padding: 6px 12px; border: none; border-radius: 16px; color: #fff; cursor: pointer; box-shadow: 0 2px 8px rgba(0,0,0,.2); opacity: .88; }
-    .main:hover { opacity: 1; }
-    .main:disabled { cursor: wait; opacity: .7; }
-    .menu { background: #fff; color: #333; border-radius: 8px; box-shadow: 0 4px 16px rgba(0,0,0,.18); padding: 4px; min-width: 200px; }
+    .dock { position: fixed; z-index: 2147483646; display: flex; align-items: center; gap: 10px; transform: translateY(-50%); pointer-events: none; user-select: none; -webkit-user-select: none; }
+    .dock[data-edge="left"] { left: 0; }
+    .dock[data-edge="right"] { right: 0; flex-direction: row-reverse; }
+    .tab { pointer-events: auto; touch-action: none; width: 14px; height: 44px; padding: 0; border: none; color: #fff; cursor: grab; display: flex; align-items: center; justify-content: center; box-shadow: 0 2px 8px rgba(0,0,0,.2); opacity: .7; transition: width .15s, margin .15s, opacity .15s; }
+    .dock[data-edge="left"] .tab { border-radius: 0 8px 8px 0; }
+    .dock[data-edge="right"] .tab { border-radius: 8px 0 0 8px; }
+    .tab:hover, .tab:focus-visible, .dock:not(.collapsed) .tab, .dock.dragging .tab { opacity: 1; }
+    /* 悬停时标签加宽，更容易点中；用负 margin 抵消，展开的按钮不会跟着移动 */
+    .tab:hover, .dock.dragging .tab { width: 24px; }
+    .dock[data-edge="left"] .tab:hover, .dock[data-edge="left"].dragging .tab { margin-right: -10px; }
+    .dock[data-edge="right"] .tab:hover, .dock[data-edge="right"].dragging .tab { margin-left: -10px; }
+    .dock.dragging .tab { cursor: grabbing; }
+    .arrow { width: 6px; height: 6px; border: solid currentColor; border-width: 0 2px 2px 0; transition: transform .2s; }
+    .dock[data-edge="left"].collapsed .arrow, .dock[data-edge="right"]:not(.collapsed) .arrow { transform: translateX(-1px) rotate(-45deg); }
+    .dock[data-edge="right"].collapsed .arrow, .dock[data-edge="left"]:not(.collapsed) .arrow { transform: translateX(1px) rotate(135deg); }
+    .body { pointer-events: auto; position: relative; transition: opacity .15s, transform .15s, visibility 0s; }
+    .dock.collapsed .body, .dock.dragging .body { pointer-events: none; visibility: hidden; opacity: 0; transform: translateX(-8px); transition: opacity .15s, transform .15s, visibility 0s .15s; }
+    .dock[data-edge="right"].collapsed .body, .dock[data-edge="right"].dragging .body { transform: translateX(8px); }
+    .main { display: block; max-width: 60vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 6px 12px; border: none; border-radius: 16px; color: #fff; cursor: pointer; box-shadow: 0 2px 8px rgba(0,0,0,.2); }
+    .dock.busy .main { cursor: wait; opacity: .7; }
+    .menu { position: absolute; bottom: calc(100% + 6px); left: 0; background: #fff; color: #333; border-radius: 8px; box-shadow: 0 4px 16px rgba(0,0,0,.18); padding: 4px; min-width: 200px; width: max-content; max-width: 60vw; }
+    .dock[data-edge="right"] .menu { left: auto; right: 0; }
+    .dock.menu-down .menu { bottom: auto; top: calc(100% + 6px); }
     .menu button { display: block; width: 100%; text-align: left; padding: 6px 10px; border: none; background: none; border-radius: 6px; cursor: pointer; color: #333; }
     .menu button:hover { background: #f2f3f5; }
     .menu .hint { padding: 4px 10px; color: #999; border-top: 1px solid #eee; margin-top: 4px; }
@@ -380,65 +404,100 @@
     rows.querySelector("input").focus();
   }
 
+  function loadPosition() {
+    const value = GM_getValue(POSITION_KEY, null);
+    if (value && (value.edge === "left" || value.edge === "right") && value.ratio >= 0 && value.ratio <= 1) {
+      return value;
+    }
+    return DEFAULT_POSITION;
+  }
+
   function renderDock(root) {
     const menu = el("div", { class: "menu" });
     const main = el("button", { class: "main" });
-    const dock = el("div", { class: "dock" }, [menu, main]);
+    const tab = el("button", { class: "tab", "aria-label": "阿里云切换身份" }, [el("span", { class: "arrow" })]);
+    const body = el("div", { class: "body" }, [menu, main]);
+    const dock = el("div", { class: "dock collapsed" }, [tab, body]);
     root.appendChild(dock);
 
     let identity = null;
     let identities = [];
     let busy = false;
+    let position = loadPosition();
+    let drag = null;
+    let suppressClick = false;
 
     const hideMenu = () => (menu.style.display = "none");
+    const menuOpen = () => menu.style.display !== "none";
+
+    // 停靠在左右边缘，纵向位置按视口高度的比例保存，窗口大小变了也不会跑出屏幕
+    const place = () => {
+      dock.dataset.edge = position.edge;
+      const y = Math.min(Math.max(position.ratio * innerHeight, 32), innerHeight - 32);
+      dock.style.top = `${y}px`;
+      dock.classList.toggle("menu-down", y < innerHeight / 2);
+    };
+
+    // 平时只露出边缘的小标签，点一下展开，再点一下收起，不会自己收回去
+    const setExpanded = (expanded) => {
+      if (!expanded) hideMenu();
+      dock.classList.toggle("collapsed", !expanded);
+    };
 
     // 身份 cookie 和配置都是全局的，每次都重新读: 别的标签页里切换过身份或改过配置，
     // 回到这个页面时按钮也要跟着变
     const refresh = () => {
-      if (busy) return;
+      if (busy || drag) return;
       identity = currentIdentity();
       identities = loadIdentities();
+      position = loadPosition();
+      place();
       hideMenu();
       if (!identity) {
         dock.style.display = "none";
         return;
       }
       dock.style.display = "";
-      main.disabled = false;
+      let color = "#ff6a00";
       if (identity.isRole) {
         main.textContent = `返回登录身份 (当前 ${identity.label})`;
         main.title = NEW_TAB_TIP;
-        main.style.background = "#0064c8";
+        color = "#0064c8";
       } else if (identities.length === 0) {
         main.textContent = "配置切换身份";
         main.title = "";
-        main.style.background = "#8a8f99";
+        color = "#8a8f99";
       } else if (identities.length === 1) {
         main.textContent = `切到 ${identityLabel(identities[0])}`;
         main.title = `${identities[0].account} / ${identities[0].role}\n${NEW_TAB_TIP}`;
-        main.style.background = "#ff6a00";
       } else {
         main.textContent = "切换身份";
         main.title = "";
-        main.style.background = "#ff6a00";
       }
+      tab.style.background = main.style.background = color;
+      tab.title = `${main.textContent}\n按住拖动可以调整位置`;
     };
 
     const isNewTabClick = (event) => event.metaKey || event.ctrlKey;
 
     const run = async (action, inNewTab) => {
       hideMenu();
+      setExpanded(true);
       busy = true;
-      main.disabled = true;
+      dock.classList.add("busy");
       main.textContent = "切换中...";
       // 新标签页要在点击时同步打开，异步回调里再开会被拦截弹窗
-      const tab = inNewTab ? window.open("about:blank", "_blank") : null;
+      const newTab = inNewTab ? window.open("about:blank", "_blank") : null;
+      const done = () => {
+        busy = false;
+        dock.classList.remove("busy");
+        refresh();
+      };
       try {
         await action();
       } catch (error) {
-        if (tab) tab.close();
-        busy = false;
-        refresh();
+        if (newTab) newTab.close();
+        done();
         alert(`阿里云身份切换失败: ${error.message}`);
         return;
       }
@@ -446,10 +505,9 @@
         location.reload();
         return;
       }
-      busy = false;
-      refresh();
-      if (tab && !tab.closed) {
-        tab.location.href = location.href;
+      done();
+      if (newTab && !newTab.closed) {
+        newTab.location.href = location.href;
       } else {
         window.open(location.href, "_blank");
       }
@@ -469,6 +527,45 @@
       menu.style.display = "";
     };
 
+    // 按住标签拖动调整位置: 移动超过几个像素才算拖动，跟着鼠标吸附到较近的左右边缘
+    tab.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0 || busy) return;
+      drag = { x: event.clientX, y: event.clientY, moved: false };
+      tab.setPointerCapture(event.pointerId);
+    });
+    tab.addEventListener("pointermove", (event) => {
+      if (!drag) return;
+      if (!drag.moved) {
+        if (Math.hypot(event.clientX - drag.x, event.clientY - drag.y) < DRAG_THRESHOLD_PX) return;
+        drag.moved = true;
+        hideMenu();
+        dock.classList.add("dragging");
+      }
+      position = {
+        edge: event.clientX < innerWidth / 2 ? "left" : "right",
+        ratio: Math.min(Math.max(event.clientY / innerHeight, 0), 1),
+      };
+      place();
+    });
+    const endDrag = () => {
+      if (!drag) return;
+      if (drag.moved) {
+        dock.classList.remove("dragging");
+        GM_setValue(POSITION_KEY, position);
+        // 松开后浏览器还会补发一次 click，吞掉它，免得拖完又展开或收起
+        suppressClick = true;
+        setTimeout(() => (suppressClick = false));
+      }
+      drag = null;
+    };
+    tab.addEventListener("pointerup", endDrag);
+    tab.addEventListener("pointercancel", endDrag);
+
+    // 点标签只负责展开和收起，不会直接触发切换
+    tab.addEventListener("click", () => {
+      if (!suppressClick) setExpanded(dock.classList.contains("collapsed"));
+    });
+
     // 鼠标移到按钮上时才预加载切换页面，点击时能省掉约 0.7 秒；
     // 不在打开页面时就加载，免得每次打开或刷新控制台都多请求一次
     main.addEventListener("mouseenter", () => {
@@ -477,7 +574,7 @@
 
     main.addEventListener("click", (event) => {
       if (busy) return;
-      const menuOpen = menu.style.display !== "none";
+      const wasMenuOpen = menuOpen();
       refresh();
       if (!identity) return;
       if (identity.isRole) {
@@ -486,17 +583,23 @@
         openSettings(root, refresh);
       } else if (identities.length === 1) {
         run(() => switchToRole(identities[0], identity), isNewTabClick(event));
-      } else if (!menuOpen) {
+      } else if (!wasMenuOpen) {
         showMenu();
       }
     });
 
+    dock.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") setExpanded(false);
+    });
     document.addEventListener("click", (event) => {
       if (!event.composedPath().includes(dock)) hideMenu();
     });
     window.addEventListener("focus", refresh);
+    window.addEventListener("resize", place);
 
     refresh();
+    // 还没配置身份时先展开，让人知道从哪里开始配置
+    if (identity && !identity.isRole && identities.length === 0) setExpanded(true);
     return refresh;
   }
 
@@ -510,6 +613,10 @@
     const root = createRoot();
     const refresh = renderDock(root);
     GM_registerMenuCommand("设置切换身份", () => openSettings(root, refresh));
+    GM_registerMenuCommand("重置按钮位置", () => {
+      GM_setValue(POSITION_KEY, DEFAULT_POSITION);
+      refresh();
+    });
   }
 
   main();
